@@ -1,13 +1,24 @@
 <script lang="ts">
   import svelteLogo from "./assets/svelte.svg";
   import viteLogo from "/vite.svg";
-  import Counter from "./lib/Counter.svelte";
 
   import { getAllCSSRules, resolveCascadeForElement } from "./cascade";
 
-  getAllCSSRules().then((rules) => {
+  let selectorValue: string = $state("");
+
+  async function runCascade() {
+    const rules = await getAllCSSRules();
     console.log("All CSS Rules:", rules);
-  });
+
+    const el = document.querySelector(selectorValue);
+    if (!el) {
+      console.warn(`No element found for selector "${selectorValue}"`);
+      return;
+    }
+    console.log("Resolving cascade for following element:", el);
+    const result = resolveCascadeForElement(el, rules);
+    console.log(result);
+  }
 </script>
 
 <main>
@@ -22,7 +33,14 @@
   <h1>Vite + Svelte</h1>
 
   <div class="card">
-    <Counter />
+    <input
+      type="text"
+      name="Selector"
+      id=""
+      placeholder=".your-selector"
+      bind:value={selectorValue}
+    />
+    <button onclick={runCascade}> Run Cascade </button>
   </div>
 
   <p>

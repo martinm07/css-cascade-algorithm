@@ -2,13 +2,11 @@ import Specificity from "@bramus/specificity";
 import { parse as parseLayerNames } from "@csstools/cascade-layer-name-parser";
 import { expand, isShorthand } from "css-shorthand-properties";
 
-console.log(expand("margin", false));
-
 /**
  * Represents detailed information about a single CSS property declaration.
  */
 interface CSSPropertyInfo {
-  name: string; // The physical property name (e.g., 'margin-left')
+  name: string; // The physical property name (e.g., 'margin-left') after expansion
   value: string;
   important: boolean;
   source: string; // e.g., "inline", "stylesheet.css"
@@ -26,7 +24,7 @@ interface CSSPropertyInfo {
     | "animation"
     | "transition"; // Internal: origin of the rule
   _ruleContainsImportant?: boolean; // Internal: whether the parent rule contains any !important properties
-  originalPropertyName?: string; // The original declared property name (e.g., 'margin' if expanded)
+  originalPropertyName?: string; // The original declared property name (e.g., 'margin' if expanded from shorthand)
 }
 
 /**
@@ -35,7 +33,7 @@ interface CSSPropertyInfo {
 interface CSSRuleAnalysis {
   selector: string;
   specificity: [number, number, number];
-  properties: CSSPropertyInfo[]; // Array of properties in this rule (now includes expanded physical properties)
+  properties: CSSPropertyInfo[]; // Array of properties in this rule (now stores original declared properties)
   stylesheetUrl: string;
   lineNumber?: number; // Approximate line number, if available from parsing (CSSOM usually doesn't provide)
   layerName?: string; // The name of the @layer this rule belongs to, if any
@@ -61,12 +59,11 @@ interface ElementStyleAnalysis {
 }
 
 // Global map to store the declared order of layers
-// This map captures the order in which layers are *first declared* via @layer statements or blocks.
 const globalLayerOrderMap = new Map<string, number>();
 let layerOrderCounter = 0;
 
 // Set to keep track of processed stylesheets to prevent infinite loops (e.g., circular @import)
-const processedSheets = new Set<string>();
+let processedSheets = new Set<string>();
 
 /**
  * Gathers all CSS rules from the document's stylesheets, parsing them and extracting relevant metadata,
@@ -77,6 +74,7 @@ const processedSheets = new Set<string>();
  */
 export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
   const allRules: CSSRuleAnalysis[] = [];
+  processedSheets = new Set<string>();
 
   /**
    * Recursively processes a CSSStyleSheet or CSSGroupingRule (like CSSMediaRule, CSSLayerBlockRule),
@@ -129,7 +127,7 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
       if (cssRule instanceof CSSStyleRule) {
         const selector = cssRule.selectorText;
         const specificityScore = calculateSpecificity(selector); // Use @bramus/specificity
-        const properties: CSSPropertyInfo[] = []; // This will now store expanded physical properties
+        const properties: CSSPropertyInfo[] = []; // This will now store original declared properties
         let ruleContainsImportant = false;
 
         // Iterate through each declaration within the style rule
@@ -142,34 +140,24 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
             ruleContainsImportant = true;
           }
 
-          // --- NEW LOGIC: Expand originalName to its physical properties ---
-          const physicalPropNames = expandLogicalProp(originalName); // Assumed external function
-
-          // If expandLogicalProp returns no specific mapping, treat the original as a physical property
-          if (physicalPropNames.length === 0) {
-            physicalPropNames.push(originalName);
-          }
-
-          physicalPropNames.forEach((physicalName) => {
-            properties.push({
-              name: physicalName, // Now it's the physical property name
-              value,
-              important,
-              active: false,
-              inherited: false,
-              source: cssRule.parentStyleSheet?.href || "inline",
-              layerName: currentLayerName,
-              specificity: specificityScore,
-              originalPropertyName: originalName, // Store original for tracing
-            });
+          // Store the original declared property name and value. Expansion will happen later.
+          properties.push({
+            name: originalName, // Store the original declared property name
+            value,
+            important,
+            active: false, // Initial state, determined during cascade resolution
+            inherited: false, // Initial state, determined during inheritance check
+            source: cssRule.parentStyleSheet?.href || "inline", // Source URL or 'inline' for <style> tags
+            layerName: currentLayerName, // Inherit layer name from parent block
+            specificity: specificityScore, // Store rule's specificity with each property
+            originalPropertyName: originalName, // Initial value: the declared name itself
           });
-          // --- END NEW LOGIC ---
         }
 
         allRules.push({
           selector,
           specificity: specificityScore,
-          properties, // This now contains expanded physical properties
+          properties, // This now contains original declared properties
           stylesheetUrl: cssRule.parentStyleSheet?.href || "inline",
           lineNumber: undefined, // CSSOM does not directly expose line numbers
           layerName: currentLayerName,
@@ -194,7 +182,6 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
       else if (cssRule instanceof CSSLayerBlockRule) {
         const layerName = cssRule.name;
         // Record the layer's declaration order if it's new.
-        // This ensures globalLayerOrderMap captures the *first appearance* of each layer name.
         if (!globalLayerOrderMap.has(layerName)) {
           globalLayerOrderMap.set(layerName, layerOrderCounter++);
         }
@@ -323,17 +310,24 @@ export function resolveCascadeForElement(
 
   matchingRules.forEach((rule) => {
     rule.properties.forEach((prop) => {
-      // Group declarations by their *physical* property name
-      if (!propertiesToConsider[prop.name]) {
-        propertiesToConsider[prop.name] = [];
-      }
-      // Add rule-level metadata to each property for comprehensive cascade sorting
-      propertiesToConsider[prop.name].push({
-        ...prop,
-        _ruleOrderIndex: rule.orderIndex,
-        _ruleOrigin: rule.origin,
-        _ruleContainsImportant: rule.containsImportant,
-        specificity: rule.specificity, // Use rule's specificity directly
+      // NEW LOGIC: Expand property here with element context
+      // 'prop' here still holds the original declared property name (e.g., 'margin')
+      const expandedProps = expandProperty(prop, element); // Call the new expansion function
+
+      expandedProps.forEach((expandedProp) => {
+        // Ensure all necessary internal cascade properties are carried over or set
+        // These properties are part of the original 'rule' or 'prop' itself,
+        // and must be copied to the new 'expandedProp' for correct sorting.
+        if (!propertiesToConsider[expandedProp.name]) {
+          propertiesToConsider[expandedProp.name] = [];
+        }
+        propertiesToConsider[expandedProp.name].push({
+          ...expandedProp, // Includes name (physical), value, important, originalPropertyName etc.
+          _ruleOrderIndex: rule.orderIndex, // From the parent rule
+          _ruleOrigin: rule.origin, // From the parent rule
+          _ruleContainsImportant: rule.containsImportant, // From the parent rule
+          specificity: rule.specificity, // From the parent rule
+        });
       });
     });
   });
@@ -455,8 +449,9 @@ export function resolveCascadeForElement(
       for (let i = 1; i < declarations.length; i++) {
         declarations[i].active = false;
         declarations[i].overshadowedBy = {
+          // Use originalPropertyName for better context on overshadowed properties
           ruleSelector:
-            declarations[i].originalPropertyName || declarations[i].name, // Use original name for overshadowing info
+            declarations[i].originalPropertyName || declarations[i].name,
           layerName: declarations[i].layerName,
         };
         // Clean up internal temp properties for overshadowed ones too
@@ -553,7 +548,7 @@ export function resolveCascadeForElement(
   // Update the original matchingRules with the `active` status based on `finalProperties`
   const updatedMatchingRules = matchingRules.map((rule) => {
     const updatedProperties = rule.properties.map((prop) => {
-      const finalProp = finalProperties[prop.name];
+      const finalProp = finalProperties[prop.name]; // Use the physical property name for lookup
       // Check if this specific property declaration (from this rule) is the one that won
       // Compare all key identifiers to ensure it's the exact declaration instance
       if (
@@ -573,7 +568,10 @@ export function resolveCascadeForElement(
           ...prop,
           active: false,
           overshadowedBy: finalProp
-            ? { ruleSelector: finalProp.source, layerName: finalProp.layerName }
+            ? {
+                ruleSelector: finalProp.originalPropertyName || finalProp.name,
+                layerName: finalProp.layerName,
+              }
             : undefined,
         };
       }
@@ -588,246 +586,6 @@ export function resolveCascadeForElement(
     finalProperties,
   };
 }
-
-/**
- * Placeholder for a function that expands a CSS property name (shorthand or logical)
- * into its corresponding physical longhand property names.
- *
- * NOTE: A full, robust implementation of this function is highly complex and would
- * require a comprehensive mapping of all CSS shorthands and logical properties to their
- * longhand/physical equivalents, potentially considering 'writing-mode', 'direction', etc.
- * For this example, it provides a basic, illustrative mapping.
- *
- * @param propName The original CSS property name (e.g., 'margin', 'margin-inline-start').
- * @returns An array of physical CSS property names that the original property maps to.
- */
-// function expandLogicalProp(propName: string): string[] {
-//   switch (propName) {
-//     // Shorthand properties
-//     case "margin":
-//       return ["margin-top", "margin-right", "margin-bottom", "margin-left"];
-//     case "padding":
-//       return ["padding-top", "padding-right", "padding-bottom", "padding-left"];
-//     case "border":
-//       return [
-//         "border-top-width",
-//         "border-right-width",
-//         "border-bottom-width",
-//         "border-left-width",
-//         "border-top-style",
-//         "border-right-style",
-//         "border-bottom-style",
-//         "border-left-style",
-//         "border-top-color",
-//         "border-right-color",
-//         "border-bottom-color",
-//         "border-left-color",
-//       ];
-//     case "background":
-//       return [
-//         "background-image",
-//         "background-position",
-//         "background-size",
-//         "background-repeat",
-//         "background-origin",
-//         "background-clip",
-//         "background-attachment",
-//         "background-color",
-//       ];
-//     case "font":
-//       return [
-//         "font-style",
-//         "font-variant",
-//         "font-weight",
-//         "font-stretch",
-//         "font-size",
-//         "line-height",
-//         "font-family",
-//       ];
-//     case "list-style":
-//       return ["list-style-type", "list-style-position", "list-style-image"];
-//     case "flex":
-//       return ["flex-grow", "flex-shrink", "flex-basis"];
-//     case "grid":
-//       return [
-//         "grid-template-rows",
-//         "grid-template-columns",
-//         "grid-template-areas",
-//         "grid-auto-rows",
-//         "grid-auto-columns",
-//         "grid-auto-flow",
-//         "grid-column-gap",
-//         "grid-row-gap",
-//       ];
-//     case "outline":
-//       return ["outline-width", "outline-style", "outline-color"];
-//     case "columns":
-//       return ["column-width", "column-count"];
-//     case "text-decoration":
-//       return [
-//         "text-decoration-line",
-//         "text-decoration-style",
-//         "text-decoration-color",
-//         "text-decoration-thickness",
-//       ];
-//     case "overflow":
-//       return ["overflow-x", "overflow-y"];
-
-//     // Logical properties - simplified mapping to *all possible* physical properties.
-//     // A truly accurate implementation would require runtime context (e.g., element's writing-mode).
-//     case "margin-inline":
-//       return ["margin-left", "margin-right"];
-//     case "margin-block":
-//       return ["margin-top", "margin-bottom"];
-//     case "margin-inline-start":
-//       return ["margin-left", "margin-right"]; // Could be one based on writing-mode
-//     case "margin-inline-end":
-//       return ["margin-left", "margin-right"];
-//     case "margin-block-start":
-//       return ["margin-top", "margin-bottom"];
-//     case "margin-block-end":
-//       return ["margin-top", "margin-bottom"];
-
-//     case "padding-inline":
-//       return ["padding-left", "padding-right"];
-//     case "padding-block":
-//       return ["padding-top", "padding-bottom"];
-//     case "padding-inline-start":
-//       return ["padding-left", "padding-right"];
-//     case "padding-inline-end":
-//       return ["padding-left", "padding-right"];
-//     case "padding-block-start":
-//       return ["padding-top", "padding-bottom"];
-//     case "padding-block-end":
-//       return ["padding-top", "padding-bottom"];
-
-//     case "border-inline":
-//       return [
-//         "border-left-width",
-//         "border-left-style",
-//         "border-left-color",
-//         "border-right-width",
-//         "border-right-style",
-//         "border-right-color",
-//       ];
-//     case "border-block":
-//       return [
-//         "border-top-width",
-//         "border-top-style",
-//         "border-top-color",
-//         "border-bottom-width",
-//         "border-bottom-style",
-//         "border-bottom-color",
-//       ];
-//     case "border-inline-start":
-//       return [
-//         "border-left-width",
-//         "border-left-style",
-//         "border-left-color",
-//         "border-right-width",
-//         "border-right-style",
-//         "border-right-color",
-//       ];
-//     case "border-inline-end":
-//       return [
-//         "border-left-width",
-//         "border-left-style",
-//         "border-left-color",
-//         "border-right-width",
-//         "border-right-style",
-//         "border-right-color",
-//       ];
-//     case "border-block-start":
-//       return [
-//         "border-top-width",
-//         "border-top-style",
-//         "border-top-color",
-//         "border-bottom-width",
-//         "border-bottom-style",
-//         "border-bottom-color",
-//       ];
-//     case "border-block-end":
-//       return [
-//         "border-top-width",
-//         "border-top-style",
-//         "border-top-color",
-//         "border-bottom-width",
-//         "border-bottom-style",
-//         "border-bottom-color",
-//       ];
-
-//     case "inset":
-//       return ["top", "right", "bottom", "left"];
-//     case "inset-inline":
-//       return ["left", "right"];
-//     case "inset-block":
-//       return ["top", "bottom"];
-
-//     case "width-inline":
-//       return ["width"]; // Or 'height' depending on writing mode
-//     case "height-block":
-//       return ["height"]; // Or 'width' depending on writing mode
-
-//     default:
-//       // For custom properties (--my-prop) or other direct properties that don't expand.
-//       // Check if it's a known longhand property that doesn't map further.
-//       // This list is not exhaustive but covers common cases.
-//       if (
-//         [
-//           "color",
-//           "font-size",
-//           "line-height",
-//           "text-align",
-//           "display",
-//           "position",
-//           "top",
-//           "right",
-//           "bottom",
-//           "left",
-//           "z-index",
-//           "opacity",
-//           "transform",
-//           "background-color",
-//           "width",
-//           "height",
-//           "min-width",
-//           "max-width",
-//           "min-height",
-//           "max-height",
-//           "border-radius",
-//           "box-shadow",
-//           "text-shadow",
-//           "cursor",
-//           "overflow-x",
-//           "overflow-y",
-//           "gap",
-//           "row-gap",
-//           "column-gap",
-//           "flex-direction",
-//           "justify-content",
-//           "align-items",
-//           "align-self",
-//           "flex-wrap",
-//           "order",
-//           "grid-template-rows",
-//           "grid-template-columns",
-//           "grid-template-areas",
-//           "grid-row-start",
-//           "grid-row-end",
-//           "grid-column-start",
-//           "grid-column-end",
-//         ].includes(propName) ||
-//         propName.startsWith("--")
-//       ) {
-//         return [propName];
-//       }
-//       // For any other unrecognized property, return it as-is.
-//       console.warn(
-//         `expandLogicalProp: Unknown property '${propName}', returning as-is.`
-//       );
-//       return [propName];
-//   }
-// }
 
 // The list was automatically generated by going to https://www.w3.org/TR/2018/WD-css-logical-1-20180827/
 //  and running the following commented-out code.
@@ -937,7 +695,10 @@ const logicalPropsMaps = expandLogicalProps(logicalPropsMaps_);
 
 console.log(logicalPropsMaps);
 
-function expandLogicalProp(propName: string, el: Element): string[] {
+function expandLogicalAndShorthandProp(
+  propName: string,
+  el: Element
+): string[] {
   // Determine how the "block" and "inline" properties should be interpreted using getComputedStyle on el.
   //  They should be mapped to the physical "top", "right", "bottom", and "left" properties, with "width" being interpreted
   //  as "left" and "right" and "height" being interpreted as "top" and "bottom"
@@ -1018,4 +779,37 @@ function expandLogicalProp(propName: string, el: Element): string[] {
   });
 
   return filteredPhysicalProps;
+}
+
+function expandProperty(
+  originalProp: CSSPropertyInfo,
+  element?: Element
+): CSSPropertyInfo[] {
+  // Helper to create an expanded prop, copying core details from the original
+  const createPhysicalPropInfo = (physicalName: string): CSSPropertyInfo => ({
+    name: physicalName,
+    value: originalProp.value,
+    important: originalProp.important,
+    active: false, // Will be determined by cascade resolution
+    inherited: false,
+    source: originalProp.source,
+    layerName: originalProp.layerName,
+    specificity: originalProp.specificity,
+    originalPropertyName: originalProp.name, // Link back to the original shorthand/logical property
+    // Carry over internal cascade properties
+    _ruleOrderIndex: originalProp._ruleOrderIndex,
+    _ruleOrigin: originalProp._ruleOrigin,
+    _ruleContainsImportant: originalProp._ruleContainsImportant,
+  });
+  if (!element) {
+    // If no element context, cannot perform accurate expansion. Return original as-is.
+    console.warn(
+      `expandProperty: Cannot expand '${originalProp.name}' without element context. Treating as single physical property.`
+    );
+    return [createPhysicalPropInfo(originalProp.name)];
+  }
+
+  return expandLogicalAndShorthandProp(originalProp.name, element).map(
+    (physicalPropName) => createPhysicalPropInfo(physicalPropName)
+  );
 }
