@@ -1,6 +1,7 @@
 import Specificity from "@bramus/specificity";
 import { parse as parseLayerNames } from "@csstools/cascade-layer-name-parser";
 import { expand, isShorthand } from "css-shorthand-properties";
+import * as csstree from "css-tree"; // Import css-tree for parsing cssText
 
 /**
  * Represents detailed information about a single CSS property declaration.
@@ -130,28 +131,51 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
         const properties: CSSPropertyInfo[] = []; // This will now store original declared properties
         let ruleContainsImportant = false;
 
-        // Iterate through each declaration within the style rule
-        for (let j = 0; j < cssRule.style.length; j++) {
-          const originalName = cssRule.style[j]; // The original property name (e.g., 'margin', 'margin-inline-start')
-          const value = cssRule.style.getPropertyValue(originalName);
-          const important =
-            cssRule.style.getPropertyPriority(originalName) === "important";
-          if (important) {
-            ruleContainsImportant = true;
-          }
+        // Extract the declaration block from cssText (e.g., "{ border-radius: 8px; ... }")
+        const declarationBlockTextMatch = cssRule.cssText.match(/{([^}]+)}/);
 
-          // Store the original declared property name and value. Expansion will happen later.
-          properties.push({
-            name: originalName, // Store the original declared property name
-            value,
-            important,
-            active: false, // Initial state, determined during cascade resolution
-            inherited: false, // Initial state, determined during inheritance check
-            source: cssRule.parentStyleSheet?.href || "inline", // Source URL or 'inline' for <style> tags
-            layerName: currentLayerName, // Inherit layer name from parent block
-            specificity: specificityScore, // Store rule's specificity with each property
-            originalPropertyName: originalName, // Initial value: the declared name itself
-          });
+        if (declarationBlockTextMatch && declarationBlockTextMatch[1]) {
+          const declarationBlockText = declarationBlockTextMatch[1]; // Get content inside curly braces
+
+          try {
+            // Use css-tree to parse the declaration list
+            // The context 'declarationList' is crucial here for parsing just properties and values
+            const ast = csstree.parse(declarationBlockText, {
+              context: "declarationList",
+            });
+
+            // Walk the AST to find individual declarations
+            csstree.walk(ast, {
+              visit: "Declaration", // We are interested in 'Declaration' nodes
+              enter: (node: csstree.Declaration) => {
+                const originalName = node.property; // Property name as declared
+                const value = csstree.generate(node.value); // Convert AST value to string
+                const important = node.important === true; // Check if important flag is set
+
+                if (important) {
+                  ruleContainsImportant = true;
+                }
+
+                properties.push({
+                  name: originalName, // Store the original declared property name
+                  value,
+                  important,
+                  active: false,
+                  inherited: false,
+                  source: cssRule.parentStyleSheet?.href || "inline",
+                  layerName: currentLayerName,
+                  specificity: specificityScore,
+                  originalPropertyName: originalName, // Initially same as name
+                });
+              },
+            });
+          } catch (e) {
+            console.warn(
+              `Error parsing CSSRule.cssText for selector "${selector}":`,
+              e
+            );
+            // If parsing fails for a specific rule, we'll continue, but its properties won't be captured.
+          }
         }
 
         allRules.push({
@@ -753,9 +777,6 @@ function expandLogicalAndShorthandProp(
 
   const filteredPhysicalProps = physicalProps.filter((physical) => {
     const logical = propName;
-    // if (logical.includes("start") || logical.includes("end")) {
-    //   if (logical.includes("block"))
-    // }
     // Maps to 1 other property
     if (logical.includes("block-start")) return match(physical, blockStart);
     else if (logical.includes("block-end"))
