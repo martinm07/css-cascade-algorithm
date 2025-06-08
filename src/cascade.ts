@@ -44,6 +44,13 @@ interface CSSRuleAnalysis {
     | "animation"
     | "transition";
   orderIndex: number; // Global order of appearance for tie-breaking
+  conditionalContexts: ConditionalContext[]; // Stack of conditional contexts this rule is within
+}
+
+interface ConditionalContext {
+  type: "media" | "supports" | "container" | "none";
+  condition: string;
+  applies: boolean; // Whether this condition is currently met
 }
 
 /**
@@ -91,6 +98,7 @@ export async function getAllCSSRules(
   async function processCSSRules(
     sheetOrRule: CSSStyleSheet | CSSGroupingRule,
     currentLayerName?: string,
+    conditionalStack: ConditionalContext[] = [], // Track the stack of conditional contexts
     p: { href: string | null } = { href: null }
   ): Promise<void> {
     // Generate a unique identifier for the current sheet/rule to prevent reprocessing
@@ -113,12 +121,13 @@ export async function getAllCSSRules(
         sheetOrRule instanceof CSSStyleSheet ||
         sheetOrRule instanceof CSSMediaRule ||
         sheetOrRule instanceof CSSLayerBlockRule ||
-        sheetOrRule instanceof CSSSupportsRule
+        sheetOrRule instanceof CSSSupportsRule ||
+        sheetOrRule instanceof CSSContainerRule
       ) {
         rules = sheetOrRule.cssRules;
       } else {
-        console.error(sheetOrRule);
-        throw new Error("Unsupported rule type");
+        console.error("Unsupported rule type", sheetOrRule);
+        return;
       }
     } catch (e) {
       console.warn(`Could not access CSS rules for: ${identifier}. Reason:`, e);
@@ -186,21 +195,22 @@ export async function getAllCSSRules(
           layerName: currentLayerName,
           origin: getOriginFromSheet(cssRule.parentStyleSheet, p.href),
           orderIndex: allRules.length, // Assign a global order index for tie-breaking
+          conditionalContexts: [...conditionalStack], // Copy the current stack
         });
       }
-      // 3.2. Handle `CSSMediaRule` (e.g., `@media screen { ... }`):
-      else if (cssRule instanceof CSSMediaRule) {
-        // Recursively process rules within the media block, passing the current layer name
-        await processCSSRules(cssRule, currentLayerName, p);
-      }
-      // 3.3. Handle `CSSImportRule` (e.g., `@import "another.css";`):
+      // 3.2. Handle `CSSImportRule` (e.g., `@import "another.css";`):
       else if (cssRule instanceof CSSImportRule) {
         // If the imported stylesheet is accessible (same origin), recursively process it
         if (cssRule.styleSheet) {
-          await processCSSRules(cssRule.styleSheet, currentLayerName, p);
+          await processCSSRules(
+            cssRule.styleSheet,
+            currentLayerName,
+            conditionalStack,
+            p
+          );
         }
       }
-      // 3.4. Handle `CSSLayerBlockRule` (e.g., `@layer components { ... }`):
+      // 3.3. Handle `CSSLayerBlockRule` (e.g., `@layer components { ... }`):
       else if (cssRule instanceof CSSLayerBlockRule) {
         // For anonymous (unnamed) layers, we still need to come up with a unique identifier
         // Unnamed layers have an empty string as the .name
@@ -210,9 +220,9 @@ export async function getAllCSSRules(
           globalLayerOrderMap.set(layerName, layerOrderCounter++);
         }
         // Recursively process rules inside this named layer block, passing its name
-        await processCSSRules(cssRule, layerName, p);
+        await processCSSRules(cssRule, layerName, conditionalStack, p);
       }
-      // 3.5. Handle `CSSLayerStatementRule` (e.g., `@layer base, components;`):
+      // 3.4. Handle `CSSLayerStatementRule` (e.g., `@layer base, components;`):
       else if (cssRule instanceof CSSLayerStatementRule) {
         // Use @csstools/cascade-layer-name-parser to extract all layer names from the statement.
         const layerNames = parseLayerNames(cssRule.nameList.join(", "));
@@ -224,10 +234,55 @@ export async function getAllCSSRules(
           }
         });
       }
+      // 3.5. Handle `CSSMediaRule` (e.g., `@media screen { ... }`):
+      else if (cssRule instanceof CSSMediaRule) {
+        // Add media query context to the stack
+        const mediaContext: ConditionalContext = {
+          type: "media",
+          condition: cssRule.conditionText || cssRule.media.mediaText,
+          applies: evaluateMediaQuery(
+            cssRule.conditionText || cssRule.media.mediaText
+          ),
+        };
+
+        // Recursively process rules within the media block, passing the current layer name
+        await processCSSRules(
+          cssRule,
+          currentLayerName,
+          [...conditionalStack, mediaContext], // Add to stack
+          p
+        );
+      }
       // 3.6. Handle other `CSSRule` types if necessary (e.g., CSSSupportsRule, CSSKeyframesRule)
       // For this analysis, we'll primarily focus on style rules and layering.
       else if (cssRule instanceof CSSSupportsRule) {
-        await processCSSRules(cssRule, currentLayerName, p);
+        // Add supports query context to the stack
+        const supportsContext: ConditionalContext = {
+          type: "supports",
+          condition: cssRule.conditionText,
+          applies: evaluateSupportsQuery(cssRule.conditionText),
+        };
+
+        await processCSSRules(
+          cssRule,
+          currentLayerName,
+          [...conditionalStack, supportsContext], // Add to stack
+          p
+        );
+      } else if (cssRule instanceof CSSContainerRule) {
+        // Add container query context to the stack
+        const containerContext: ConditionalContext = {
+          type: "container",
+          condition: cssRule.containerQuery,
+          applies: false, // We don't have the element context evaluate this
+        };
+
+        await processCSSRules(
+          cssRule,
+          currentLayerName,
+          [...conditionalStack, containerContext], // Add to stack
+          p
+        );
       }
     }
   }
@@ -240,7 +295,7 @@ export async function getAllCSSRules(
 
   // Start processing from all document stylesheets
   for (const sheet of [...documentSheets, ...detachedSheets]) {
-    await processCSSRules(sheet.sheet, undefined, { href: sheet.href });
+    await processCSSRules(sheet.sheet, undefined, [], { href: sheet.href });
   }
 
   return allRules;
@@ -299,6 +354,71 @@ function getOriginFromSheet(
 }
 
 /**
+ * Evaluates whether a media query condition is currently met
+ */
+function evaluateMediaQuery(mediaQuery: string): boolean {
+  try {
+    return window.matchMedia(mediaQuery).matches;
+  } catch (e) {
+    console.warn(`Invalid media query: ${mediaQuery}`, e);
+    return false; // Conservative approach - don't apply if we can't evaluate
+  }
+}
+
+/**
+ * Evaluates whether a @supports condition is met
+ */
+function evaluateSupportsQuery(supportsQuery: string): boolean {
+  try {
+    // Remove the @supports prefix if present and clean up the query
+    const cleanQuery = supportsQuery.replace(/^@supports\s+/i, "").trim();
+    return CSS.supports(cleanQuery);
+  } catch (e) {
+    console.warn(`Invalid @supports query: ${supportsQuery}`, e);
+    return false;
+  }
+}
+
+/**
+ * Evaluates whether a container query condition is met for a given element
+ */
+function evaluateContainerQuery(
+  containerQuery: string,
+  element?: Element
+): boolean {
+  // TODO: Wait for browsers to implement Element.matchContainer()
+  //       https://github.com/w3c/csswg-drafts/issues/6205
+  //       "[css-contain] Similar to window.matchMedia(), Container Queries should have a similar method"
+  console.warn(
+    `Container query evaluation not fully implemented: ${containerQuery}`
+  );
+  return true; // Placeholder - implement based on your needs
+}
+
+/**
+ * Determines if all conditional contexts in a rule's stack are currently met
+ */
+function areConditionalContextsMet(
+  contexts: ConditionalContext[],
+  element?: Element
+): boolean {
+  return contexts.every((context) => {
+    switch (context.type) {
+      case "media":
+        return evaluateMediaQuery(context.condition);
+      case "supports":
+        return evaluateSupportsQuery(context.condition);
+      case "container":
+        return evaluateContainerQuery(context.condition, element);
+      case "none":
+        return true;
+      default:
+        return false;
+    }
+  });
+}
+
+/**
  * Filters the global list of rules to find those that match a given element.
  * @param element The HTMLElement to match rules against.
  * @param allRules The comprehensive list of all parsed CSS rules.
@@ -310,9 +430,13 @@ function getMatchingRulesForElement(
 ): CSSRuleAnalysis[] {
   return allRules.filter((rule) => {
     try {
-      // Use native Element.matches() for efficient selector matching
-      // This is generally reliable for CSS selectors, even complex ones.
-      return element.matches(rule.selector);
+      // First check if the selector matches
+      if (!element.matches(rule.selector)) {
+        return false;
+      }
+
+      // Then check if all conditional contexts are met
+      return areConditionalContextsMet(rule.conditionalContexts, element);
     } catch (e) {
       // Handle invalid selectors gracefully, e.g., log error to console
       console.warn(
