@@ -3,6 +3,8 @@ import { parse as parseLayerNames } from "@csstools/cascade-layer-name-parser";
 import { expand, isShorthand } from "css-shorthand-properties";
 import * as csstree from "css-tree"; // Import css-tree for parsing cssText
 
+type SpecificityVal = [i1: number, i2: number, i3: number, i4: number];
+
 /**
  * Represents detailed information about a single CSS property declaration.
  */
@@ -12,7 +14,7 @@ interface CSSPropertyInfo {
   important: boolean;
   source: string; // e.g., "inline", "stylesheet.css"
   layerName?: string; // The name of the @layer this property belongs to, if any
-  specificity?: [number, number, number]; // specificity score (copied from parent rule for sorting)
+  specificity?: SpecificityVal; // specificity score (copied from parent rule for sorting)
   active: boolean; // True if this property is actively applied, false if overshadowed
   overshadowedBy?: { ruleSelector: string; layerName?: string }; // Details of the rule that overshadowed it
   inherited: boolean; // True if this property's value is inherited from an ancestor
@@ -32,7 +34,7 @@ interface CSSPropertyInfo {
  */
 interface CSSRuleAnalysis {
   selector: string;
-  specificity: [number, number, number];
+  specificity: SpecificityVal;
   properties: CSSPropertyInfo[]; // Array of properties in this rule (now stores original declared properties)
   stylesheetUrl: string;
   layerName?: string; // The name of the @layer this rule belongs to, if any
@@ -301,24 +303,88 @@ export async function getAllCSSRules(
   return allRules;
 }
 
+// Add this function to extract inline styles from an element
+function getInlineStylesForElement(element: Element): CSSRuleAnalysis | null {
+  const htmlElement = element as HTMLElement;
+
+  // Check if the element has a style attribute
+  if (!htmlElement.style || htmlElement.style.length === 0) {
+    return null;
+  }
+
+  const properties: CSSPropertyInfo[] = [];
+
+  // Iterate through all inline style properties
+  for (let i = 0; i < htmlElement.style.length; i++) {
+    const propertyName = htmlElement.style[i];
+    const value = htmlElement.style.getPropertyValue(propertyName);
+    const priority = htmlElement.style.getPropertyPriority(propertyName);
+
+    properties.push({
+      name: propertyName,
+      value: value,
+      important: priority === "important",
+      active: false,
+      inherited: false,
+      source: "inline",
+      originalPropertyName: propertyName,
+    });
+  }
+
+  // Create a synthetic rule for inline styles
+  return {
+    conditionalContexts: [],
+    selector: "[inline]", // Synthetic selector for debugging/identification
+    specificity: [1, 0, 0, 0], // Inline styles have highest specificity
+    properties: properties,
+    stylesheetUrl: "inline",
+    origin: "inline",
+    orderIndex: Infinity, // Inline styles appear "last" in document order
+  };
+}
+
 /**
  * Calculates the specificity of a CSS selector using @bramus/specificity.
  * @param selector The CSS selector string.
  * @returns A tuple representing the specificity [A, B, C].
  */
-function calculateSpecificity(selector: string): [number, number, number] {
+function calculateSpecificity(selector: string): SpecificityVal {
   if (!selector) {
-    return [0, 0, 0];
+    return [0, 0, 0, 0];
   }
   // @bramus/specificity returns an array of Specificity instances, one for each selector in a list.
   // We expect a single selector here, so we take the first element.
   const specificities = Specificity.calculate(selector);
   if (specificities.length === 0) {
     // Should not happen for valid selectors but as a safeguard
-    return [0, 0, 0];
+    return [0, 0, 0, 0];
   }
   const s = specificities[0];
-  return [s.a, s.b, s.c];
+  return [0, s.a, s.b, s.c];
+}
+
+/**
+ * Compares two specificity values and determines if the first specificity
+ * is greater than the second specificity.
+ *
+ * Specificity values are compared lexicographically, meaning the comparison
+ * starts from the most significant component (e.g., ID selectors) and proceeds
+ * to the least significant component (e.g., type selectors).
+ *
+ * @param spec1 - The first specificity value to compare, represented as an array of numbers.
+ * @param spec2 - The second specificity value to compare, represented as an array of numbers.
+ * @returns `true` if `spec1` is greater than `spec2`, `false` if `spec1` is less than `spec2`,
+ *          or `null` if the specificities are equal.
+ */
+function specificityGreater(spec1: SpecificityVal, spec2: SpecificityVal) {
+  return spec1.reduce((p, c, i) => {
+    if (p === null) {
+      if (c > spec2[i]) return true;
+      else if (c < spec2[i]) return false;
+      // The specificities are equal
+      return null;
+    } else return p;
+  }, null as null | boolean);
 }
 
 /**
@@ -461,6 +527,10 @@ export function resolveCascadeForElement(
   allRules: CSSRuleAnalysis[]
 ): ElementStyleAnalysis {
   const matchingRules = getMatchingRulesForElement(element, allRules);
+
+  const inlineStyles = getInlineStylesForElement(element);
+  if (inlineStyles) matchingRules.push(inlineStyles);
+
   const finalProperties: { [key: string]: CSSPropertyInfo } = {};
   const propertiesToConsider: { [key: string]: CSSPropertyInfo[] } = {};
 
@@ -578,26 +648,20 @@ export function resolveCascadeForElement(
 
       // 2. Specificity (A-B-C) - only if origin/importance/layer are equal
       if (a.specificity && b.specificity) {
-        if (a.specificity[0] !== b.specificity[0])
-          return b.specificity[0] - a.specificity[0];
-        if (a.specificity[1] !== b.specificity[1])
-          return b.specificity[1] - a.specificity[1];
-        if (a.specificity[2] !== b.specificity[2])
-          return b.specificity[2] - a.specificity[2];
+        const isAGreater = specificityGreater(a.specificity, b.specificity);
+        if (isAGreater !== null) return isAGreater ? -1 : 1;
       }
 
       // 3. Order of Appearance (final tie-breaker if all else is equal)
-      return a._ruleOrderIndex! - b._ruleOrderIndex!; // Earlier declared rule wins
+      return b._ruleOrderIndex! - a._ruleOrderIndex!; // Later declared rule wins
     });
 
     if (declarations.length > 0) {
       const winningDeclaration = declarations[0];
-      // Store the winning declaration in finalProperties, cleaning up internal temp properties
+      // Store the winning declaration in finalProperties
       finalProperties[propName] = {
         ...winningDeclaration,
         active: true,
-        _ruleOrderIndex: undefined,
-        _ruleOrigin: undefined,
       };
 
       // Mark overshadowed properties
@@ -609,9 +673,6 @@ export function resolveCascadeForElement(
             declarations[i].originalPropertyName || declarations[i].name,
           layerName: declarations[i].layerName,
         };
-        // Clean up internal temp properties for overshadowed ones too
-        declarations[i]._ruleOrderIndex = undefined;
-        declarations[i]._ruleOrigin = undefined;
       }
     }
   }
@@ -702,7 +763,14 @@ export function resolveCascadeForElement(
   // Update the original matchingRules with the `active` status based on `finalProperties`
   const updatedMatchingRules = matchingRules.map((rule) => {
     const updatedProperties = rule.properties.map((prop) => {
-      const finalProp = finalProperties[prop.name]; // Use the physical property name for lookup
+      // Find match of originalPropertyName in finalProperties with original properties
+      const propNameMatch = Object.entries(finalProperties).find(
+        ([, { originalPropertyName }]) => originalPropertyName === prop.name
+      );
+      const finalProp = propNameMatch
+        ? finalProperties[propNameMatch[1].name]
+        : null;
+
       // Check if this specific property declaration (from this rule) is the one that won
       // Compare all key identifiers to ensure it's the exact declaration instance
       if (
@@ -711,9 +779,11 @@ export function resolveCascadeForElement(
         finalProp.important === prop.important &&
         finalProp.source === prop.source &&
         finalProp.layerName === prop.layerName &&
+        // finalProp._ruleOrderIndex === prop._ruleOrderIndex && // Compare ruleOrderIndex, which is the closest thing to an ID we have
         prop.specificity?.[0] === finalProp.specificity?.[0] && // Compare specificity components too
         prop.specificity?.[1] === finalProp.specificity?.[1] &&
         prop.specificity?.[2] === finalProp.specificity?.[2] &&
+        prop.specificity?.[3] === finalProp.specificity?.[3] &&
         prop.originalPropertyName === finalProp.originalPropertyName // Compare original property name
       ) {
         return { ...prop, active: true };
@@ -723,7 +793,7 @@ export function resolveCascadeForElement(
           active: false,
           overshadowedBy: finalProp
             ? {
-                ruleSelector: finalProp.originalPropertyName || finalProp.name,
+                ruleSelector: rule.selector,
                 layerName: finalProp.layerName,
               }
             : undefined,
