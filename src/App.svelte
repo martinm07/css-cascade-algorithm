@@ -1,13 +1,25 @@
 <script lang="ts">
   import svelteLogo from "./assets/svelte.svg";
   import viteLogo from "/vite.svg";
+  import firefoxStylesPath from "./lib/firefoxDefaultCSS.txt";
 
   import { getAllCSSRules, resolveCascadeForElement } from "./cascade";
+  import { onMount } from "svelte";
 
   let selectorValue: string = $state("");
 
+  const UAStyles = new CSSStyleSheet();
+  fetch(firefoxStylesPath)
+    .then((resp) => resp.text())
+    .then((firefoxDefaultCSS) => {
+      UAStyles.replaceSync(firefoxDefaultCSS);
+      console.log(UAStyles);
+    });
+
   async function runCascade() {
-    const rules = await getAllCSSRules();
+    const rules = await getAllCSSRules([
+      { sheet: UAStyles, href: "resource://user-agent-styles.css" },
+    ]);
     console.log("All CSS Rules:", rules);
 
     const el = document.querySelector(selectorValue);
@@ -30,7 +42,7 @@
       <img src={svelteLogo} class="logo svelte" alt="Svelte Logo" />
     </a>
   </div>
-  <h1>Vite + Svelte</h1>
+  <h1>CSS Cascade Algorithm Implementation</h1>
 
   <div class="card">
     <input

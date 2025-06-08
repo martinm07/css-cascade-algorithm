@@ -56,6 +56,11 @@ interface ElementStyleAnalysis {
   finalProperties: { [key: string]: CSSPropertyInfo }; // The winning properties for the element after cascade
 }
 
+interface SheetInfo {
+  sheet: CSSStyleSheet;
+  href: string | null;
+}
+
 // Global map to store the declared order of layers
 const globalLayerOrderMap = new Map<string, number>();
 let layerOrderCounter = 0;
@@ -70,7 +75,9 @@ let processedSheets = new Set<string>();
  * @returns A promise resolving to an array of CSSRuleAnalysis objects, representing all found CSS rules
  * with their associated metadata.
  */
-export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
+export async function getAllCSSRules(
+  detachedSheets: SheetInfo[] = []
+): Promise<CSSRuleAnalysis[]> {
   const allRules: CSSRuleAnalysis[] = [];
   processedSheets = new Set<string>();
 
@@ -83,7 +90,8 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
    */
   async function processCSSRules(
     sheetOrRule: CSSStyleSheet | CSSGroupingRule,
-    currentLayerName?: string
+    currentLayerName?: string,
+    p: { href: string | null } = { href: null }
   ): Promise<void> {
     // Generate a unique identifier for the current sheet/rule to prevent reprocessing
     const identifier =
@@ -176,20 +184,20 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
           properties, // This now contains original declared properties
           stylesheetUrl: cssRule.parentStyleSheet?.href || "inline",
           layerName: currentLayerName,
-          origin: getOriginFromSheet(cssRule.parentStyleSheet),
+          origin: getOriginFromSheet(cssRule.parentStyleSheet, p.href),
           orderIndex: allRules.length, // Assign a global order index for tie-breaking
         });
       }
       // 3.2. Handle `CSSMediaRule` (e.g., `@media screen { ... }`):
       else if (cssRule instanceof CSSMediaRule) {
         // Recursively process rules within the media block, passing the current layer name
-        await processCSSRules(cssRule, currentLayerName);
+        await processCSSRules(cssRule, currentLayerName, p);
       }
       // 3.3. Handle `CSSImportRule` (e.g., `@import "another.css";`):
       else if (cssRule instanceof CSSImportRule) {
         // If the imported stylesheet is accessible (same origin), recursively process it
         if (cssRule.styleSheet) {
-          await processCSSRules(cssRule.styleSheet, currentLayerName);
+          await processCSSRules(cssRule.styleSheet, currentLayerName, p);
         }
       }
       // 3.4. Handle `CSSLayerBlockRule` (e.g., `@layer components { ... }`):
@@ -202,7 +210,7 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
           globalLayerOrderMap.set(layerName, layerOrderCounter++);
         }
         // Recursively process rules inside this named layer block, passing its name
-        await processCSSRules(cssRule, layerName);
+        await processCSSRules(cssRule, layerName, p);
       }
       // 3.5. Handle `CSSLayerStatementRule` (e.g., `@layer base, components;`):
       else if (cssRule instanceof CSSLayerStatementRule) {
@@ -219,15 +227,20 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
       // 3.6. Handle other `CSSRule` types if necessary (e.g., CSSSupportsRule, CSSKeyframesRule)
       // For this analysis, we'll primarily focus on style rules and layering.
       else if (cssRule instanceof CSSSupportsRule) {
-        await processCSSRules(cssRule, currentLayerName);
+        await processCSSRules(cssRule, currentLayerName, p);
       }
     }
   }
 
+  const documentSheets: SheetInfo[] = Array.from(document.styleSheets).map(
+    (sheet) => {
+      return { sheet, href: sheet.href };
+    }
+  );
+
   // Start processing from all document stylesheets
-  for (const sheet of Array.from(document.styleSheets)) {
-    // Cast to CSSStyleSheet as `document.styleSheets` typically contains this type
-    await processCSSRules(sheet as CSSStyleSheet);
+  for (const sheet of [...documentSheets, ...detachedSheets]) {
+    await processCSSRules(sheet.sheet, undefined, { href: sheet.href });
   }
 
   return allRules;
@@ -259,8 +272,11 @@ function calculateSpecificity(selector: string): [number, number, number] {
  * @returns The origin type ('user-agent', 'user', 'author', 'inline', 'animation', 'transition').
  */
 function getOriginFromSheet(
-  sheet: CSSStyleSheet | null
+  sheet: CSSStyleSheet | null,
+  givenHref: string | null
 ): "user-agent" | "user" | "author" | "inline" | "animation" | "transition" {
+  const href = givenHref ?? sheet?.href ?? null;
+
   // For direct inline style attributes (element.style), this function is not called.
   // For <style> tags, sheet.href is null, so it falls to 'author' by default.
   if (!sheet) {
@@ -270,11 +286,11 @@ function getOriginFromSheet(
   }
 
   // Heuristics for user-agent stylesheets (often have specific prefixes or no href)
-  if (sheet.href) {
+  if (href) {
     if (
-      sheet.href.startsWith("chrome-extension://") ||
-      sheet.href.startsWith("resource://") ||
-      sheet.href.startsWith("about:")
+      href.startsWith("chrome-extension://") ||
+      href.startsWith("resource://") ||
+      href.startsWith("about:")
     ) {
       return "user-agent";
     }
