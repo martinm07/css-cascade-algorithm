@@ -24,7 +24,6 @@ interface CSSPropertyInfo {
     | "inline"
     | "animation"
     | "transition"; // Internal: origin of the rule
-  _ruleContainsImportant?: boolean; // Internal: whether the parent rule contains any !important properties
   originalPropertyName?: string; // The original declared property name (e.g., 'margin' if expanded from shorthand)
 }
 
@@ -36,7 +35,6 @@ interface CSSRuleAnalysis {
   specificity: [number, number, number];
   properties: CSSPropertyInfo[]; // Array of properties in this rule (now stores original declared properties)
   stylesheetUrl: string;
-  lineNumber?: number; // Approximate line number, if available from parsing (CSSOM usually doesn't provide)
   layerName?: string; // The name of the @layer this rule belongs to, if any
   origin:
     | "user-agent"
@@ -45,7 +43,6 @@ interface CSSRuleAnalysis {
     | "inline"
     | "animation"
     | "transition";
-  containsImportant: boolean; // True if any property within this rule is !important
   orderIndex: number; // Global order of appearance for tie-breaking
 }
 
@@ -129,7 +126,6 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
         const selector = cssRule.selectorText;
         const specificityScore = calculateSpecificity(selector); // Use @bramus/specificity
         const properties: CSSPropertyInfo[] = []; // This will now store original declared properties
-        let ruleContainsImportant = false;
 
         // Extract the declaration block from cssText (e.g., "{ border-radius: 8px; ... }")
         const declarationBlockTextMatch = cssRule.cssText.match(/{([^}]+)}/);
@@ -151,10 +147,6 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
                 const originalName = node.property; // Property name as declared
                 const value = csstree.generate(node.value); // Convert AST value to string
                 const important = node.important === true; // Check if important flag is set
-
-                if (important) {
-                  ruleContainsImportant = true;
-                }
 
                 properties.push({
                   name: originalName, // Store the original declared property name
@@ -183,10 +175,8 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
           specificity: specificityScore,
           properties, // This now contains original declared properties
           stylesheetUrl: cssRule.parentStyleSheet?.href || "inline",
-          lineNumber: undefined, // CSSOM does not directly expose line numbers
           layerName: currentLayerName,
           origin: getOriginFromSheet(cssRule.parentStyleSheet),
-          containsImportant: ruleContainsImportant,
           orderIndex: allRules.length, // Assign a global order index for tie-breaking
         });
       }
@@ -204,7 +194,9 @@ export async function getAllCSSRules(): Promise<CSSRuleAnalysis[]> {
       }
       // 3.4. Handle `CSSLayerBlockRule` (e.g., `@layer components { ... }`):
       else if (cssRule instanceof CSSLayerBlockRule) {
-        const layerName = cssRule.name;
+        // For anonymous (unnamed) layers, we still need to come up with a unique identifier
+        // Unnamed layers have an empty string as the .name
+        const layerName = cssRule.name || `anonymous-${crypto.randomUUID()}`;
         // Record the layer's declaration order if it's new.
         if (!globalLayerOrderMap.has(layerName)) {
           globalLayerOrderMap.set(layerName, layerOrderCounter++);
@@ -349,7 +341,6 @@ export function resolveCascadeForElement(
           ...expandedProp, // Includes name (physical), value, important, originalPropertyName etc.
           _ruleOrderIndex: rule.orderIndex, // From the parent rule
           _ruleOrigin: rule.origin, // From the parent rule
-          _ruleContainsImportant: rule.containsImportant, // From the parent rule
           specificity: rule.specificity, // From the parent rule
         });
       });
@@ -373,6 +364,7 @@ export function resolveCascadeForElement(
     const isLayered = layerOrder !== undefined;
     const totalLayers = globalLayerOrderMap.size; // Total number of layers discovered
 
+    const INC = totalLayers + 1;
     let score = 0; // Base score for this declaration
 
     // Step 1: Handle Transitions (absolute highest and lowest in the cascade)
@@ -384,14 +376,14 @@ export function resolveCascadeForElement(
     if (isImportant) {
       // Order from highest !important to lowest !important (excluding transitions):
       // User-agent > User > Inline > Author (layered: earlier declared wins) > Author (unlayered) > Animation
-      if (origin === "user-agent") score = 1000;
-      else if (origin === "user") score = 900;
+      if (origin === "user-agent") score = INC * 11;
+      else if (origin === "user") score = INC * 10;
       else if (origin === "inline")
-        score = 800; // Inline `style` attribute (!important)
+        score = INC * 9; // Inline `style` attribute (!important)
       else if (origin === "author") {
         // Author !important rules have a base score, then adjusted by layer.
         // Earlier declared layers win for !important.
-        score = 700; // Base score for author !important
+        score = INC * 8; // Base score for author !important
         if (isLayered) {
           // For !important, smaller layerOrder (earlier declared) gets a higher score.
           // If layerOrder is 0 (first declared), it gets the max bonus (totalLayers - 0).
@@ -401,31 +393,31 @@ export function resolveCascadeForElement(
           // Giving them a score equal to the base without layer bonus ensures this.
           score += 0;
         }
-      } else if (origin === "animation") score = 600; // Animation !important is weakest among important declarations.
+      } else if (origin === "animation") score = INC * 7; // Animation !important is weakest among important declarations.
     }
     // Step 3: Handle Normal declarations (lower precedence group)
     else {
       // Order from highest normal to lowest normal (excluding transitions):
       // Animation > Inline > Author (unlayered) > Author (layered: later declared wins) > User > User-agent
-      if (origin === "animation")
-        score = 500; // Animation normal is highest among normal declarations.
+      if (origin === "animation") score = INC * 6;
+      // Animation normal is highest among normal declarations.
       else if (origin === "inline")
-        score = 400; // Inline `style` attribute (normal)
+        score = INC * 5; // Inline `style` attribute (normal)
       else if (origin === "author") {
         // Author normal rules have a base score, then adjusted by layer.
         // Unlayered author normal declarations are *higher* than any layered author normal rules.
         // Later declared layers win for normal rules.
-        score = 300; // Base score for author normal
+        score = INC * 3; // Base score for author normal
         if (isLayered) {
           // For normal, larger layerOrder (later declared) gets a higher score.
           score += layerOrder || 0;
         } else {
           // Unlayered normal author is *stronger* than any layered normal author.
           // Giving it a score higher than the max possible layered score ensures this.
-          score += totalLayers + 100;
+          score += INC;
         }
-      } else if (origin === "user") score = 200;
-      else if (origin === "user-agent") score = 100;
+      } else if (origin === "user") score = INC * 2;
+      else if (origin === "user-agent") score = INC * 1;
     }
     return score;
   };
@@ -466,7 +458,6 @@ export function resolveCascadeForElement(
         active: true,
         _ruleOrderIndex: undefined,
         _ruleOrigin: undefined,
-        _ruleContainsImportant: undefined,
       };
 
       // Mark overshadowed properties
@@ -481,7 +472,6 @@ export function resolveCascadeForElement(
         // Clean up internal temp properties for overshadowed ones too
         declarations[i]._ruleOrderIndex = undefined;
         declarations[i]._ruleOrigin = undefined;
-        declarations[i]._ruleContainsImportant = undefined;
       }
     }
   }
@@ -820,7 +810,6 @@ function expandProperty(
     // Carry over internal cascade properties
     _ruleOrderIndex: originalProp._ruleOrderIndex,
     _ruleOrigin: originalProp._ruleOrigin,
-    _ruleContainsImportant: originalProp._ruleContainsImportant,
   });
   if (!element) {
     // If no element context, cannot perform accurate expansion. Return original as-is.
