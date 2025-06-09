@@ -1,43 +1,43 @@
 import Specificity from "@bramus/specificity";
 import { parse as parseLayerNames } from "@csstools/cascade-layer-name-parser";
 import { expand, isShorthand } from "css-shorthand-properties";
-import * as csstree from "css-tree"; // Import css-tree for parsing cssText
+import * as csstree from "css-tree";
 
 type SpecificityVal = [i1: number, i2: number, i3: number, i4: number];
 
 /**
- * Represents detailed information about a single CSS property declaration.
+ * Represents information about a CSS property declaration.
  */
 interface CSSPropertyInfo {
-  name: string; // The physical property name (e.g., 'margin-left') after expansion
+  name: string; // Physical property name after expansion
   value: string;
   important: boolean;
-  source: string; // e.g., "inline", "stylesheet.css"
-  layerName?: string; // The name of the @layer this property belongs to, if any
-  specificity?: SpecificityVal; // specificity score (copied from parent rule for sorting)
-  active: boolean; // True if this property is actively applied, false if overshadowed
-  overshadowedBy?: { ruleSelector: string; layerName?: string }; // Details of the rule that overshadowed it
-  inherited: boolean; // True if this property's value is inherited from an ancestor
-  _ruleOrderIndex?: number; // Internal: global order of appearance of the rule for tie-breaking
+  source: string; // Source of the property (e.g., "inline", "stylesheet.css")
+  layerName?: string; // Name of the @layer, if any
+  specificity?: SpecificityVal; // Specificity score for sorting
+  active: boolean; // True if applied, false if overshadowed
+  overshadowedBy?: { ruleSelector: string; layerName?: string }; // Details of overshadowing rule
+  inherited: boolean; // True if inherited from an ancestor
+  _ruleOrderIndex?: number; // Global order of appearance for tie-breaking
   _ruleOrigin?:
     | "user-agent"
     | "user"
     | "author"
     | "inline"
     | "animation"
-    | "transition"; // Internal: origin of the rule
-  originalPropertyName?: string; // The original declared property name (e.g., 'margin' if expanded from shorthand)
+    | "transition"; // Rule origin
+  originalPropertyName?: string; // Original declared property name
 }
 
 /**
- * Represents a parsed CSS rule with additional analytical metadata.
+ * Represents a parsed CSS rule with metadata.
  */
 interface CSSRuleAnalysis {
   selector: string;
   specificity: SpecificityVal;
-  properties: CSSPropertyInfo[]; // Array of properties in this rule (now stores original declared properties)
+  properties: CSSPropertyInfo[]; // Properties in this rule
   stylesheetUrl: string;
-  layerName?: string; // The name of the @layer this rule belongs to, if any
+  layerName?: string; // Name of the @layer, if any
   origin:
     | "user-agent"
     | "user"
@@ -46,23 +46,23 @@ interface CSSRuleAnalysis {
     | "animation"
     | "transition";
   orderIndex: number; // Global order of appearance for tie-breaking
-  conditionalContexts: ConditionalContext[]; // Stack of conditional contexts this rule is within
+  conditionalContexts: ConditionalContext[]; // Stack of conditional contexts
 }
 
 interface ConditionalContext {
   type: "media" | "supports" | "container" | "none";
   condition: string;
-  applies: boolean; // Whether this condition is currently met
+  applies: boolean; // Whether the condition is currently met
 }
 
 /**
- * Represents the comprehensive style analysis for a specific HTML element.
+ * Represents the resolved style analysis for an element.
  */
 interface ElementStyleAnalysis {
   element: Element;
-  computedStyles: CSSStyleDeclaration; // The final computed styles from the browser (for validation)
-  matchingRules: CSSRuleAnalysis[]; // All rules that match the element, before cascade resolution
-  finalProperties: { [key: string]: CSSPropertyInfo }; // The winning properties for the element after cascade
+  computedStyles: CSSStyleDeclaration; // Final computed styles from the browser
+  matchingRules: CSSRuleAnalysis[]; // Rules matching the element
+  finalProperties: { [key: string]: CSSPropertyInfo }; // Winning properties after cascade
 }
 
 interface SheetInfo {
@@ -70,19 +70,23 @@ interface SheetInfo {
   href: string | null;
 }
 
-// Global map to store the declared order of layers
+// Global map for declared order of layers
 const globalLayerOrderMap = new Map<string, number>();
 let layerOrderCounter = 0;
 
-// Set to keep track of processed stylesheets to prevent infinite loops (e.g., circular @import)
+// Track processed stylesheets to prevent infinite loops
 let processedSheets = new Set<string>();
 
+// prettier-ignore
+// Tiny Simple Hash (https://stackoverflow.com/a/52171480/11493659)
+const TSH=(s: string)=>{for(var i=0,h=9;i<s.length;)h=Math.imul(h^s.charCodeAt(i++),9**9);return h^h>>>9}
+
 /**
- * Gathers all CSS rules from the document's stylesheets, parsing them and extracting relevant metadata,
- * including cascade layer information.
+ * Gathers all CSS rules from the document's stylesheets and detached stylesheets,
+ * extracting metadata such as specificity, layer information, and conditional contexts.
  *
- * @returns A promise resolving to an array of CSSRuleAnalysis objects, representing all found CSS rules
- * with their associated metadata.
+ * @param detachedSheets - An optional array of detached stylesheets to include in the analysis.
+ * @returns A promise resolving to an array of CSSRuleAnalysis objects, representing all parsed CSS rules.
  */
 export async function getAllCSSRules(
   detachedSheets: SheetInfo[] = []
@@ -91,16 +95,12 @@ export async function getAllCSSRules(
   processedSheets = new Set<string>();
 
   /**
-   * Recursively processes a CSSStyleSheet or CSSGroupingRule (like CSSMediaRule, CSSLayerBlockRule),
-   * extracting CSS rules and their metadata.
-   *
-   * @param sheetOrRule The stylesheet or CSS grouping rule to process.
-   * @param currentLayerName The name of the current cascade layer context (optional, inherited from parent).
+   * Recursively processes a stylesheet or grouping rule, extracting rules and metadata.
    */
   async function processCSSRules(
     sheetOrRule: CSSStyleSheet | CSSGroupingRule,
     currentLayerName?: string,
-    conditionalStack: ConditionalContext[] = [], // Track the stack of conditional contexts
+    conditionalStack: ConditionalContext[] = [],
     p: { href: string | null } = { href: null }
   ): Promise<void> {
     // Generate a unique identifier for the current sheet/rule to prevent reprocessing
@@ -108,8 +108,10 @@ export async function getAllCSSRules(
       sheetOrRule instanceof CSSStyleSheet && sheetOrRule.href
         ? sheetOrRule.href
         : sheetOrRule instanceof CSSStyleSheet && sheetOrRule.ownerNode
-        ? `inline-style-${(sheetOrRule.ownerNode as HTMLElement).outerHTML}` // Unique for inline <style> tags
-        : `rule-group-${sheetOrRule.constructor.name}-${Math.random()}`; // Fallback for unnamed grouping rules
+        ? `inline-style-${Math.abs(
+            TSH((sheetOrRule.ownerNode as HTMLElement).outerHTML)
+          )}` // Unique for inline <style> tags
+        : `rule-group-${sheetOrRule.constructor.name}-${crypto.randomUUID()}`; // Fallback for unnamed grouping rules
 
     if (processedSheets.has(identifier)) {
       return; // Already processed, prevent infinite loop
@@ -303,7 +305,12 @@ export async function getAllCSSRules(
   return allRules;
 }
 
-// Add this function to extract inline styles from an element
+/**
+ * Extracts inline styles from an HTML element and represents them as a synthetic CSS rule.
+ *
+ * @param element - The HTML element to extract inline styles from.
+ * @returns A CSSRuleAnalysis object representing the inline styles, or null if no inline styles exist.
+ */
 function getInlineStylesForElement(element: Element): CSSRuleAnalysis | null {
   const htmlElement = element as HTMLElement;
 
@@ -344,9 +351,10 @@ function getInlineStylesForElement(element: Element): CSSRuleAnalysis | null {
 }
 
 /**
- * Calculates the specificity of a CSS selector using @bramus/specificity.
- * @param selector The CSS selector string.
- * @returns A tuple representing the specificity [A, B, C].
+ * Calculates the specificity of a given CSS selector using the @bramus/specificity library.
+ *
+ * @param selector - The CSS selector string to calculate specificity for.
+ * @returns A SpecificityVal tuple representing the specificity score.
  */
 function calculateSpecificity(selector: string): SpecificityVal {
   if (!selector) {
@@ -364,17 +372,11 @@ function calculateSpecificity(selector: string): SpecificityVal {
 }
 
 /**
- * Compares two specificity values and determines if the first specificity
- * is greater than the second specificity.
+ * Compares two specificity values to determine if the first is greater than the second.
  *
- * Specificity values are compared lexicographically, meaning the comparison
- * starts from the most significant component (e.g., ID selectors) and proceeds
- * to the least significant component (e.g., type selectors).
- *
- * @param spec1 - The first specificity value to compare, represented as an array of numbers.
- * @param spec2 - The second specificity value to compare, represented as an array of numbers.
- * @returns `true` if `spec1` is greater than `spec2`, `false` if `spec1` is less than `spec2`,
- *          or `null` if the specificities are equal.
+ * @param spec1 - The first specificity value to compare.
+ * @param spec2 - The second specificity value to compare.
+ * @returns `true` if `spec1` is greater, `false` if `spec2` is greater, or `null` if they are equal.
  */
 function specificityGreater(spec1: SpecificityVal, spec2: SpecificityVal) {
   return spec1.reduce((p, c, i) => {
@@ -388,9 +390,11 @@ function specificityGreater(spec1: SpecificityVal, spec2: SpecificityVal) {
 }
 
 /**
- * Determines the origin of a stylesheet.
- * @param sheet The CSSStyleSheet object or null for inline style attributes.
- * @returns The origin type ('user-agent', 'user', 'author', 'inline', 'animation', 'transition').
+ * Determines the origin of a stylesheet (e.g., user-agent, user, author, inline).
+ *
+ * @param sheet - The CSSStyleSheet object or null for inline styles.
+ * @param givenHref - An optional href to override the sheet's href.
+ * @returns The origin type as a string.
  */
 function getOriginFromSheet(
   sheet: CSSStyleSheet | null,
@@ -420,7 +424,10 @@ function getOriginFromSheet(
 }
 
 /**
- * Evaluates whether a media query condition is currently met
+ * Evaluates whether a given media query condition is currently met.
+ *
+ * @param mediaQuery - The media query string to evaluate.
+ * @returns `true` if the media query matches, `false` otherwise.
  */
 function evaluateMediaQuery(mediaQuery: string): boolean {
   try {
@@ -432,7 +439,10 @@ function evaluateMediaQuery(mediaQuery: string): boolean {
 }
 
 /**
- * Evaluates whether a @supports condition is met
+ * Evaluates whether a given @supports condition is met.
+ *
+ * @param supportsQuery - The @supports condition string to evaluate.
+ * @returns `true` if the condition is supported, `false` otherwise.
  */
 function evaluateSupportsQuery(supportsQuery: string): boolean {
   try {
@@ -446,7 +456,11 @@ function evaluateSupportsQuery(supportsQuery: string): boolean {
 }
 
 /**
- * Evaluates whether a container query condition is met for a given element
+ * Evaluates whether a container query condition is met for a given element.
+ *
+ * @param containerQuery - The container query string to evaluate.
+ * @param element - The HTML element to evaluate the query against (optional).
+ * @returns `true` if the condition is met, `false` otherwise.
  */
 function evaluateContainerQuery(
   containerQuery: string,
@@ -462,7 +476,11 @@ function evaluateContainerQuery(
 }
 
 /**
- * Determines if all conditional contexts in a rule's stack are currently met
+ * Determines if all conditional contexts in a rule's stack are currently met.
+ *
+ * @param contexts - An array of ConditionalContext objects representing the rule's conditions.
+ * @param element - The HTML element to evaluate the conditions against (optional).
+ * @returns `true` if all conditions are met, `false` otherwise.
  */
 function areConditionalContextsMet(
   contexts: ConditionalContext[],
@@ -485,9 +503,10 @@ function areConditionalContextsMet(
 }
 
 /**
- * Filters the global list of rules to find those that match a given element.
- * @param element The HTMLElement to match rules against.
- * @param allRules The comprehensive list of all parsed CSS rules.
+ * Filters the global list of CSS rules to find those that match a given HTML element.
+ *
+ * @param element - The HTML element to match rules against.
+ * @param allRules - The comprehensive list of all parsed CSS rules.
  * @returns An array of CSSRuleAnalysis objects that match the element.
  */
 function getMatchingRulesForElement(
@@ -517,9 +536,10 @@ function getMatchingRulesForElement(
 }
 
 /**
- * Resolves the final styles for an element by applying the CSS cascade algorithm.
- * @param element The HTMLElement to analyze.
- * @param allRules The comprehensive list of all parsed CSS rules.
+ * Resolves the final styles for an HTML element by applying the CSS cascade algorithm.
+ *
+ * @param element - The HTML element to analyze.
+ * @param allRules - The comprehensive list of all parsed CSS rules.
  * @returns An ElementStyleAnalysis object containing the resolved styles and cascade details.
  */
 export function resolveCascadeForElement(
@@ -723,40 +743,12 @@ export function resolveCascadeForElement(
 
   // Helper to determine if a property is generally inheritable (simplified list)
   function isInheritableProperty(prop: string): boolean {
-    const inheritableProps = [
-      "azimuth",
-      "border-collapse",
-      "border-spacing",
-      "caption-side",
-      "color",
-      "cursor",
-      "direction",
-      "empty-cells",
-      "font-family",
-      "font-size",
-      "font-style",
-      "font-variant",
-      "font-weight",
-      "font",
-      "letter-spacing",
-      "line-height",
-      "list-style-image",
-      "list-style-position",
-      "list-style-type",
-      "list-style",
-      "orphans",
-      "quotes",
-      "tab-size",
-      "text-align",
-      "text-indent",
-      "text-transform",
-      "visibility",
-      "white-space",
-      "widows",
-      "word-break",
-      "word-spacing",
-      "word-wrap",
-    ];
+    // prettier-ignore
+    const inheritableProps = ["azimuth", "border-collapse", "border-spacing", "caption-side", "color", "cursor", "direction",
+                              "empty-cells", "font-family", "font-size", "font-style", "font-variant", "font-weight", "font",
+                              "letter-spacing", "line-height", "list-style-image", "list-style-position", "list-style-type",
+                              "list-style", "orphans", "quotes", "tab-size", "text-align", "text-indent", "text-transform",
+                              "visibility", "white-space", "widows", "word-break", "word-spacing", "word-wrap"];
     return inheritableProps.includes(prop);
   }
 
@@ -779,12 +771,13 @@ export function resolveCascadeForElement(
         finalProp.important === prop.important &&
         finalProp.source === prop.source &&
         finalProp.layerName === prop.layerName &&
-        // finalProp._ruleOrderIndex === prop._ruleOrderIndex && // Compare ruleOrderIndex, which is the closest thing to an ID we have
+        finalProp._ruleOrderIndex === rule.orderIndex && // Compare ruleOrderIndex, which is the closest thing to an ID we have
         prop.specificity?.[0] === finalProp.specificity?.[0] && // Compare specificity components too
         prop.specificity?.[1] === finalProp.specificity?.[1] &&
         prop.specificity?.[2] === finalProp.specificity?.[2] &&
         prop.specificity?.[3] === finalProp.specificity?.[3] &&
         prop.originalPropertyName === finalProp.originalPropertyName // Compare original property name
+        // (note we do not compare .name, which is mapped to a physical property in finalProperties)
       ) {
         return { ...prop, active: true };
       } else {
@@ -915,43 +908,58 @@ function expandLogicalProps(logicalPropsMaps: LogicalPropsMaps) {
   return final;
 }
 
+// This recursive expansion of the auto-generated logicalPropsMaps_ is so that
+//  every logical property maps to the full possible list of *physical properties*
+//  it may map to in resolution. Namely, the mappings of shorthand logical properties
+//  are fully expanded.
 const logicalPropsMaps = expandLogicalProps(logicalPropsMaps_);
 
 console.log(logicalPropsMaps);
 
-function expandLogicalAndShorthandProp(
-  propName: string,
-  el: Element
-): string[] {
+function mapPropToPhysical(propName: string, el: Element): string[] {
   // Determine how the "block" and "inline" properties should be interpreted using getComputedStyle on el.
   //  They should be mapped to the physical "top", "right", "bottom", and "left" properties, with "width" being interpreted
   //  as "left" and "right" and "height" being interpreted as "top" and "bottom"
   if (!logicalPropsMaps.some(([logical]) => logical === propName)) {
+    // If the property is not a logical propety but is a shorthand, expand the shorthand
+    //  Note: The code handling logical properties also expands shorthand logical properties, which
+    //         removes the need of using "css-shorthand-properties" in that case (and a good thing
+    //         too, as the package doesn't deal with logical shorthand properties currently).
     if (isShorthand(propName)) return expand(propName, true).flat();
     // If the property is not a logical property and not shorthand, return it as is.
     else return [propName];
   }
 
   const computedStyle = window.getComputedStyle(el);
+
   const writingMode =
     computedStyle.getPropertyValue("writing-mode") || "horizontal-tb";
-  const direction = computedStyle.getPropertyValue("direction") || "ltr";
 
+  const direction = computedStyle.getPropertyValue("direction") || "ltr";
   const isLTR = direction === "ltr";
+
+  const orientation = computedStyle.getPropertyValue("text-orientation");
+  const isUpright = orientation === "upright";
 
   type PhysicalDir = "top" | "right" | "bottom" | "left";
   let blockStart: PhysicalDir, inlineStart: PhysicalDir;
+  // This logic is very specific, and derived from systematically trying all combinations
+  //  using Firefox and the inspector
   if (writingMode === "horizontal-tb") {
     blockStart = "top";
     inlineStart = isLTR ? "left" : "right";
-  } else if (writingMode === "vertical-rl" || writingMode === "sideways-rl") {
+  } else if (writingMode === "vertical-rl") {
+    blockStart = "right";
+    inlineStart = isLTR || isUpright ? "top" : "bottom";
+  } else if (writingMode === "sideways-rl") {
     blockStart = "right";
     inlineStart = isLTR ? "top" : "bottom";
   } else if (writingMode === "vertical-lr") {
     blockStart = "left";
-    inlineStart = isLTR ? "top" : "bottom";
+    inlineStart = isLTR || isUpright ? "top" : "bottom";
   } else if (writingMode === "sideways-lr") {
     blockStart = "left";
+    // This discrepancy is particularly interesting/strange
     inlineStart = isLTR ? "bottom" : "top";
   }
 
@@ -977,24 +985,21 @@ function expandLogicalAndShorthandProp(
 
   const filteredPhysicalProps = physicalProps.filter((physical) => {
     const logical = propName;
+    // prettier-ignore
     // Maps to 1 other property
     if (logical.includes("block-start")) return match(physical, blockStart);
-    else if (logical.includes("block-end"))
-      return match(physical, oppositeDir(blockStart));
-    else if (logical.includes("inline-start"))
-      return match(physical, inlineStart);
-    else if (logical.includes("inline-end"))
-      return match(physical, oppositeDir(inlineStart));
+    else if (logical.includes("block-end")) return match(physical, oppositeDir(blockStart));
+    else if (logical.includes("inline-start")) return match(physical, inlineStart);
+    else if (logical.includes("inline-end")) return match(physical, oppositeDir(inlineStart));
+    // Handling border-radius logical properties (e.g. border-start-end-radius -> border-top-right radius)
+    //                                     essentially border-block-start-inline-end-radius
+    else if (logical.includes("start-start")) return match(physical, blockStart) && match(physical, inlineStart);
+    else if (logical.includes("start-end")) return match(physical, blockStart) && match(physical, oppositeDir(inlineStart));
+    else if (logical.includes("end-start")) return match(physical, oppositeDir(blockStart)) && match(physical, inlineStart);
+    else if (logical.includes("end-end")) return match(physical, oppositeDir(blockStart)) && match(physical, oppositeDir(inlineStart));
     // Shorthand that maps to 2 properties
-    else if (logical.includes("block"))
-      return (
-        match(physical, blockStart) || match(physical, oppositeDir(blockStart))
-      );
-    else if (logical.includes("inline"))
-      return (
-        match(physical, inlineStart) ||
-        match(physical, oppositeDir(inlineStart))
-      );
+    else if (logical.includes("block")) return match(physical, blockStart) || match(physical, oppositeDir(blockStart))
+    else if (logical.includes("inline")) return match(physical, inlineStart) || match(physical, oppositeDir(inlineStart))
     // Shorthand that maps to 4 properties
     else return true;
   });
@@ -1029,7 +1034,7 @@ function expandProperty(
     return [createPhysicalPropInfo(originalProp.name)];
   }
 
-  return expandLogicalAndShorthandProp(originalProp.name, element).map(
-    (physicalPropName) => createPhysicalPropInfo(physicalPropName)
+  return mapPropToPhysical(originalProp.name, element).map((physicalPropName) =>
+    createPhysicalPropInfo(physicalPropName)
   );
 }

@@ -1,10 +1,9 @@
 <script lang="ts">
   import svelteLogo from "./assets/svelte.svg";
-  import viteLogo from "/vite.svg";
-  import firefoxStylesPath from "./lib/firefoxDefaultCSS.txt";
+  import viteLogo from "./assets/vite.svg";
+  import firefoxStylesPath from "./assets/firefoxDefaultCSS.txt";
 
   import { getAllCSSRules, resolveCascadeForElement } from "./cascade";
-  import { onMount } from "svelte";
 
   let selectorValue: string = $state("");
 
@@ -17,6 +16,8 @@
     });
 
   async function runCascade() {
+    // The custom href is used by the getOriginFromSheet to determine
+    //  that this is a user-agent stylesheet.
     const rules = await getAllCSSRules([
       { sheet: UAStyles, href: "resource://user-agent-styles.css" },
     ]);
@@ -63,7 +64,9 @@
     >, the official Svelte app framework powered by Vite!
   </p>
 
-  <p class="read-the-docs">Click on the Vite and Svelte logos to learn more</p>
+  <p class="read-the-console">
+    Open the console to find the results of the cascade emulation.
+  </p>
 </main>
 
 <style>
@@ -79,7 +82,7 @@
   .logo.svelte:hover {
     filter: drop-shadow(0 0 2em #ff3e00aa);
   }
-  .read-the-docs {
+  .read-the-console {
     color: #888;
   }
 </style>

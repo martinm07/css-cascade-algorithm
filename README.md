@@ -1,47 +1,31 @@
-# Svelte + TS + Vite
+# JavaScript Implementation of the CSS Cascade Algorithm
 
-This template should help get you started developing with Svelte and TypeScript in Vite.
+<div style="text-align: center;"><img src="./public/js-css-cascade-logo.png" width="30%"></div>
+<div style="text-align: center; font-size: 1.5em;"><em>Currently, as far as I know, the best (and pretty much only) JavaScript implementation publicly available.</em></div>
 
-## Recommended IDE Setup
+\
+This was a short and largely experimental project of getting LLMs to write an implementation of the CSS cascade algorithm, after learning that no modern third-party solution existed.
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+This obviously doesn't provide a mission-critical spec-savvy ultra-realistic implementation of the cascade algorithm&mdash;and I don't plan to maintain it much at all beyond my own needs&mdash;but it should be pretty good in the majaority of cases. It should correctly handle:
 
-## Need an official Svelte framework?
+- CSS `@layer` at-rules (the precedence of rules between layers, other layers, and unlayered rules)
+- Property `!important` declarations (apparently the precedence among `!important` properties reverses the usual `Inline > Author > User Agent`, who knew? And also that declaring `!important!important` doesn't actually do anything&mdash; I swear it did...)
+- Shorthand properties overshadowing and getting correctly overshadowed by corresponding longhand properties (by being internally mapped to its longhands)
+- Logical properties getting internally mapped to the appropriate physical properties (thus also correctly participating in the overshadowing process)
+- Rules inside `@media` and `@supports` at-rules only applying if the queries are satisfied (_there is also logic for container queries, though those are quite modern and no API exists yet to determine whether a container query is being satisfied or not- something like `Element.matchContainer()`_)
+- Properties being inherited (_though this wasn't a priority, and not really tested at all_)
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+There is a function for discovering all of the rules across all of the stylesheets currently in the document called `getAllCSSRules()` which generates all the vital information which makes the output of the cascade interesting. The cascade algorithm itself is implemented in the `resolveCascadeForElement()` function, which&mdash;as the name suggests&mdash;finds all of the styles (as they are written in the stylesheets, different from simply using `getComputedStyle()`) that apply to the given element, giving the information of how the element got its visual appearance, as well as information on the cascade process itself.
 
-## Technical considerations
+`getAllCSSRules()` also takes in detached sheets (i.e. `CSSStyleSheet` objects not in `document.styleSheets`) that you would like to be considered by the cascade algorithm. In the demo, I put in a copy of one of Firefox's User-Agent stylesheets (because UA stylsheets aren't discoverable through `document.styleSheets`). And on top of performing the cascade, `resolveCascadeForElement()` also discovers the inline styles of the element which is being passed in, so that they too may participate.
 
-**Why use this over SvelteKit?**
+All of the interesting code is inside [src/cascade.ts](src/cascade.ts). The Vite/Svelte app around it serves as a tech demo for this cascade algorithm implementation. To see the demo, run the following:
 
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + TypeScript + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why `global.d.ts` instead of `compilerOptions.types` inside `jsconfig.json` or `tsconfig.json`?**
-
-Setting `compilerOptions.types` shuts out all other types not explicitly listed in the configuration. Using triple-slash references keeps the default TypeScript setting of accepting type information from the entire workspace, while also adding `svelte` and `vite/client` type information.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `allowJs` in the TS template?**
-
-While `allowJs: false` would indeed prevent the use of `.js` files in the project, it does not prevent the use of JavaScript syntax in `.svelte` files. In addition, it would force `checkJs: false`, bringing the worst of both worlds: not being able to guarantee the entire codebase is TypeScript, and also having worse typechecking for the existing JavaScript. In addition, there are valid use cases in which a mixed codebase may be relevant.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/rixo/svelte-hmr#svelte-hmr).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```ts
-// store.ts
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
 ```
+npm install
+npm run dev
+```
+
+---
+
+As mentioned, LLMs (Google Gemini, Claude and Copilot) were instrumental in the writing of this code. The majority of the work was done in a singular [chat on Gemini](https://gemini.google.com/share/3ab55210d6b2), which had started with me asking it to research alternatives to [brothercake's CSSUtilities](https://brothercake.com/site/resources/scripts/cssutilities/) script, which had provided essentially the same functionality as this project, but was unfortunately not updated in 15 years and is not able to understand CSS Level 4 specification features, most notably `@layer` at-rules which it ignores (including all the rules within).
