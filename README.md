@@ -17,7 +17,7 @@ This obviously doesn't provide a mission-critical spec-savvy ultra-realistic imp
 
 There is a function for discovering all of the rules across all of the stylesheets currently in the document called `getAllCSSRules()` which generates all the vital information which makes the output of the cascade interesting. The cascade algorithm itself is implemented in the `resolveCascadeForElement()` function, which&mdash;as the name suggests&mdash;finds all of the styles (as they are written in the stylesheets, different from simply using `getComputedStyle()`) that apply to the given element, giving the information of how the element got its visual appearance, as well as information on the cascade process itself.
 
-`getAllCSSRules()` also takes in detached sheets (i.e. `CSSStyleSheet` objects not in `document.styleSheets`) that you would like to be considered by the cascade algorithm. In the demo, I put in a copy of one of Firefox's User-Agent stylesheets (because UA stylsheets aren't discoverable through `document.styleSheets`). And on top of performing the cascade, `resolveCascadeForElement()` also discovers the inline styles of the element which is being passed in, so that they too may participate.
+`getAllCSSRules()` also takes in detached sheets (i.e. `CSSStyleSheet` objects not in `document.styleSheets`) that you would like to be considered by the cascade algorithm. In the demo, I put in a copy of one of Firefox's User-Agent stylesheets (because UA stylesheets aren't discoverable through `document.styleSheets`). And on top of performing the cascade, `resolveCascadeForElement()` also discovers the inline styles of the element which is being passed in, so that they too may participate.
 
 All of the interesting code is inside [src/cascade.ts](src/cascade.ts). The Vite/Svelte app around it serves as a tech demo for this cascade algorithm implementation. To see the demo, run the following:
 
@@ -25,6 +25,8 @@ All of the interesting code is inside [src/cascade.ts](src/cascade.ts). The Vite
 npm install
 npm run dev
 ```
+
+...Or visit the [publicly hosted version](https://martinm07.github.io/js-css-cascade-algorithm.github.io/).
 
 ---
 
